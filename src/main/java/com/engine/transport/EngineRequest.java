@@ -1,11 +1,11 @@
 package com.engine.transport;
 
+import com.engine.messages.Cancel;
 import com.engine.messages.InputMessage;
+import com.engine.messages.NewOrder;
 
 /**
- * Request from a client to the matching engine.
- * 
- * <p>Wraps the input message with client context for routing responses.
+ * Engine request with client context.
  */
 public record EngineRequest(
     ClientId clientId,
@@ -14,21 +14,20 @@ public record EngineRequest(
 ) {
     
     /**
-     * Create a request with user ID extracted from message.
+     * Create request, extracting userId from message.
      */
     public static EngineRequest of(ClientId clientId, InputMessage message) {
         int userId = extractUserId(message);
         return new EngineRequest(clientId, userId, message);
     }
     
-    /**
-     * Extract user ID from an input message for routing.
-     */
-    private static int extractUserId(InputMessage msg) {
-        return switch (msg) {
-            case com.engine.messages.NewOrder order -> order.userId();
-            case com.engine.messages.Cancel cancel -> cancel.userId();
-            default -> 0;
-        };
+    private static int extractUserId(InputMessage message) {
+        if (message instanceof NewOrder order) {
+            return order.userId();
+        } else if (message instanceof Cancel cancel) {
+            return cancel.userId();
+        } else {
+            return 0;
+        }
     }
 }

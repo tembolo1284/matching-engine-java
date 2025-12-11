@@ -15,14 +15,6 @@ import java.util.concurrent.TimeUnit;
  * 
  * <p>Runs in a dedicated thread, processing requests from a bounded queue
  * and routing outputs back to clients.
- * 
- * <h2>Design Principles</h2>
- * <ul>
- *   <li>Single-threaded engine processing (no locking needed)</li>
- *   <li>Bounded input queue for backpressure</li>
- *   <li>Pre-allocated output buffer (reused across all messages)</li>
- *   <li>Non-blocking output routing</li>
- * </ul>
  */
 public final class EngineTask implements Runnable {
     
@@ -38,14 +30,6 @@ public final class EngineTask implements Runnable {
     /** Shutdown flag. */
     private volatile boolean running = true;
     
-    /**
-     * Create a new engine task.
-     * 
-     * @param requestQueue bounded queue for incoming requests
-     * @param registry client registry for routing responses
-     * @param multicastQueue queue for multicast publisher (may be null)
-     * @param metrics server metrics
-     */
     public EngineTask(
             BlockingQueue<EngineRequest> requestQueue,
             ClientRegistry registry,
@@ -101,9 +85,6 @@ public final class EngineTask implements Runnable {
         System.err.println("Engine task: shutting down");
     }
     
-    /**
-     * Process a single request.
-     */
     private void processRequest(EngineRequest request) {
         metrics.messagesReceived.increment();
         
@@ -113,10 +94,11 @@ public final class EngineTask implements Runnable {
         }
         
         // Update specific metrics based on message type
-        switch (request.message()) {
-            case NewOrder order -> metrics.ordersReceived.increment();
-            case Cancel cancel -> metrics.cancelsReceived.increment();
-            default -> {}
+        InputMessage message = request.message();
+        if (message instanceof NewOrder) {
+            metrics.ordersReceived.increment();
+        } else if (message instanceof Cancel) {
+            metrics.cancelsReceived.increment();
         }
         
         // Process in engine (reuse output buffer)
@@ -130,9 +112,6 @@ public final class EngineTask implements Runnable {
         }
     }
     
-    /**
-     * Route an output message to appropriate recipients.
-     */
     private void routeOutput(OutputMessage msg, ClientId originatingClient) {
         // Update trade count
         if (msg instanceof Trade) {

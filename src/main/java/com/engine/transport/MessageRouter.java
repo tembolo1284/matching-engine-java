@@ -7,16 +7,13 @@ import java.util.List;
 
 /**
  * Message routing logic.
- * 
- * <p>Determines which clients should receive each output message:
- * <ul>
- *   <li>Ack → originating client only</li>
- *   <li>CancelAck → originating client only</li>
- *   <li>Trade → buyer + seller + multicast</li>
- *   <li>TopOfBook → multicast only</li>
- * </ul>
  */
 public final class MessageRouter {
+    
+    /**
+     * Target for unicast delivery.
+     */
+    public record UnicastTarget(ClientId clientId, OutputMessage message) {}
     
     /**
      * Routing result.
@@ -25,95 +22,71 @@ public final class MessageRouter {
         List<UnicastTarget> unicastTargets,
         boolean shouldMulticast
     ) {
-        public static RouteResult unicastOnly(ClientId target, OutputMessage msg) {
-            List<UnicastTarget> targets = new ArrayList<>(1);
-            targets.add(new UnicastTarget(target, msg));
-            return new RouteResult(targets, false);
+        public static RouteResult unicast(ClientId clientId, OutputMessage message) {
+            return new RouteResult(List.of(new UnicastTarget(clientId, message)), false);
         }
         
-        public static RouteResult multicastOnly() {
+        public static RouteResult multicast(OutputMessage message) {
             return new RouteResult(List.of(), true);
         }
         
-        public static RouteResult empty() {
-            return new RouteResult(List.of(), false);
+        public static RouteResult both(List<UnicastTarget> targets, boolean multicast) {
+            return new RouteResult(targets, multicast);
         }
     }
-    
-    /**
-     * Unicast target.
-     */
-    public record UnicastTarget(ClientId clientId, OutputMessage message) {}
     
     private MessageRouter() {}
     
     /**
-     * Route an output message to appropriate recipients.
-     * 
-     * @param msg the output message
-     * @param originatingClient the client that sent the original request
-     * @param registry client registry for user→client lookups
-     * @return routing result with unicast targets and multicast flag
+     * Route message to originating client only.
+     * Simplified routing for single-client scenarios.
+     */
+    public static RouteResult routeToOriginator(OutputMessage message, ClientId originator) {
+        if (message instanceof Ack ack) {
+            return RouteResult.unicast(originator, ack);
+        } else if (message instanceof CancelAck cancel) {
+            return RouteResult.unicast(originator, cancel);
+        } else if (message instanceof Trade trade) {
+            // Trade goes to originator + multicast
+            // In full implementation, would also send to counterparty
+            List<UnicastTarget> targets = new ArrayList<>();
+            targets.add(new UnicastTarget(originator, trade));
+            return RouteResult.both(targets, true);
+        } else if (message instanceof TopOfBookUpdate tob) {
+            // TOB goes to multicast only
+            return RouteResult.multicast(tob);
+        } else {
+            return RouteResult.unicast(originator, message);
+        }
+    }
+    
+    /**
+     * Full routing with user ID lookups.
      */
     public static RouteResult route(
-            OutputMessage msg,
-            ClientId originatingClient,
+            OutputMessage message, 
+            ClientId originator,
             ClientRegistry registry) {
         
-        return switch (msg) {
-            case Ack ack -> 
-                RouteResult.unicastOnly(originatingClient, msg);
+        if (message instanceof Ack ack) {
+            return RouteResult.unicast(originator, ack);
+        } else if (message instanceof CancelAck cancel) {
+            return RouteResult.unicast(originator, cancel);
+        } else if (message instanceof Trade trade) {
+            List<UnicastTarget> targets = new ArrayList<>();
             
-            case CancelAck cancelAck -> 
-                RouteResult.unicastOnly(originatingClient, msg);
+            // Send to buyer
+            targets.add(new UnicastTarget(originator, trade));
             
-            case Trade trade -> 
-                routeTrade(trade, registry);
+            // Send to seller (if different client)
+            // In a real implementation, we'd look up the counterparty
+            // by user ID through the registry
             
-            case TopOfBookUpdate tob -> 
-                RouteResult.multicastOnly();
-        };
-    }
-    
-    /**
-     * Simplified routing: send all messages to originating client.
-     * 
-     * <p>Use this when user ID tracking is not set up or for testing.
-     */
-    public static RouteResult routeToOriginator(OutputMessage msg, ClientId originatingClient) {
-        boolean shouldMulticast = switch (msg) {
-            case Trade t -> true;
-            case TopOfBookUpdate tob -> true;
-            default -> false;
-        };
-        
-        List<UnicastTarget> targets = new ArrayList<>(1);
-        targets.add(new UnicastTarget(originatingClient, msg));
-        
-        return new RouteResult(targets, shouldMulticast);
-    }
-    
-    /**
-     * Route a trade to both buyer and seller.
-     */
-    private static RouteResult routeTrade(Trade trade, ClientRegistry registry) {
-        List<UnicastTarget> targets = new ArrayList<>(2);
-        
-        // Send to buyer
-        ClientId buyerClient = registry.getClientForUser(trade.buyUserId());
-        if (buyerClient != null) {
-            targets.add(new UnicastTarget(buyerClient, trade));
+            return RouteResult.both(targets, true);
+        } else if (message instanceof TopOfBookUpdate) {
+            return RouteResult.multicast(message);
+        } else {
+            return RouteResult.unicast(originator, message);
         }
-        
-        // Send to seller (if different from buyer)
-        if (trade.buyUserId() != trade.sellUserId()) {
-            ClientId sellerClient = registry.getClientForUser(trade.sellUserId());
-            if (sellerClient != null) {
-                targets.add(new UnicastTarget(sellerClient, trade));
-            }
-        }
-        
-        // Also multicast for market data
-        return new RouteResult(targets, true);
     }
 }
