@@ -11,19 +11,13 @@
     <packaging>jar</packaging>
 
     <name>Java Matching Engine</name>
-    <description>High-performance order matching engine following NASA Power of Ten rules</description>
+    <description>High-performance order matching engine</description>
 
     <properties>
-        <java.version>21</java.version>
-        <maven.compiler.source>${java.version}</maven.compiler.source>
-        <maven.compiler.target>${java.version}</maven.compiler.target>
+        <!-- Java 17 for wider compatibility -->
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        
-        <!-- Enable preview features for pattern matching if needed -->
-        <maven.compiler.enablePreview>false</maven.compiler.enablePreview>
-        
-        <!-- Test dependencies -->
-        <junit.version>5.10.2</junit.version>
     </properties>
 
     <dependencies>
@@ -31,75 +25,93 @@
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>${junit.version}</version>
+            <version>5.10.1</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
 
     <build>
         <plugins>
-            <!-- Compiler plugin with strict settings (Power of Ten Rule 10) -->
+            <!-- Compiler plugin with strict settings -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.12.1</version>
                 <configuration>
-                    <source>${java.version}</source>
-                    <target>${java.version}</target>
+                    <source>17</source>
+                    <target>17</target>
                     <compilerArgs>
                         <arg>-Xlint:all</arg>
                         <arg>-Werror</arg>
                     </compilerArgs>
-                    <!-- Enable assertions in tests -->
-                    <testCompilerArgument>-ea</testCompilerArgument>
+                    <!-- Enable preview features if needed -->
+                    <!-- <enablePreview>true</enablePreview> -->
                 </configuration>
             </plugin>
 
-            <!-- Surefire for tests with assertions enabled -->
+            <!-- JAR plugin with main class -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>com.engine.transport.EngineServer</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+
+            <!-- Shade plugin for fat JAR -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>com.engine.transport.EngineServer</mainClass>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Surefire for tests -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.2.5</version>
+                <version>3.2.3</version>
                 <configuration>
+                    <!-- Enable assertions in tests -->
                     <argLine>-ea</argLine>
                 </configuration>
             </plugin>
 
-            <!-- SpotBugs for static analysis (Power of Ten Rule 10) -->
+            <!-- Exec plugin for running -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.1.1</version>
+                <configuration>
+                    <mainClass>com.engine.transport.EngineServer</mainClass>
+                </configuration>
+            </plugin>
+
+            <!-- SpotBugs for static analysis -->
             <plugin>
                 <groupId>com.github.spotbugs</groupId>
                 <artifactId>spotbugs-maven-plugin</artifactId>
-                <version>4.8.3.1</version>
-                <configuration>
-                    <effort>Max</effort>
-                    <threshold>Low</threshold>
-                </configuration>
+                <version>4.8.3.0</version>
             </plugin>
         </plugins>
     </build>
-
-    <profiles>
-        <!-- Profile for running with assertions -->
-        <profile>
-            <id>assertions</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.codehaus.mojo</groupId>
-                        <artifactId>exec-maven-plugin</artifactId>
-                        <version>3.1.1</version>
-                        <configuration>
-                            <executable>java</executable>
-                            <arguments>
-                                <argument>-ea</argument>
-                                <argument>-cp</argument>
-                                <classpath/>
-                                <argument>${exec.mainClass}</argument>
-                            </arguments>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
 </project>

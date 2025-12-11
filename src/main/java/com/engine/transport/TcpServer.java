@@ -19,7 +19,7 @@ import java.util.concurrent.*;
  *   <li>Main thread accepts connections</li>
  *   <li>Each client gets a reader thread and writer thread</li>
  *   <li>Protocol auto-detected from first bytes</li>
- *   <li>Virtual threads (Java 21) for efficient concurrency</li>
+ *   <li>Cached thread pool for efficient concurrency</li>
  * </ul>
  */
 public final class TcpServer {
@@ -44,8 +44,12 @@ public final class TcpServer {
         this.engineQueue = engineQueue;
         this.metrics = metrics;
         
-        // Use virtual threads for scalable I/O (Java 21)
-        this.executor = Executors.newVirtualThreadPerTaskExecutor();
+        // Use cached thread pool for scalable I/O (Java 17 compatible)
+        this.executor = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            return t;
+        });
     }
     
     /**
@@ -70,7 +74,7 @@ public final class TcpServer {
                     continue;
                 }
                 
-                // Handle client in virtual thread
+                // Handle client in thread pool
                 executor.submit(() -> handleClient(clientSocket));
                 
             } catch (SocketException e) {
@@ -130,8 +134,10 @@ public final class TcpServer {
             BlockingQueue<OutputMessage> outboundQueue = registry.register(info);
             
             // Start writer thread
-            Thread writerThread = Thread.startVirtualThread(() -> 
+            Thread writerThread = new Thread(() -> 
                 runWriter(clientId, out, outboundQueue, codec));
+            writerThread.setDaemon(true);
+            writerThread.start();
             
             // Run reader loop (in current thread)
             runReader(clientId, in, codec);
