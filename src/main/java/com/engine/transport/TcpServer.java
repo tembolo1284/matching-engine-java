@@ -3,7 +3,6 @@ package com.engine.transport;
 import com.engine.messages.InputMessage;
 import com.engine.messages.OutputMessage;
 import com.engine.protocol.*;
-import com.engine.transport.ClientInfo.Transport;
 
 import java.io.*;
 import java.net.*;
@@ -11,330 +10,204 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.concurrent.*;
 
-/**
- * TCP server supporting CSV, Binary, and FIX protocols.
- * 
- * <p>Architecture:
- * <ul>
- *   <li>Main thread accepts connections</li>
- *   <li>Each client gets a reader thread and writer thread</li>
- *   <li>Protocol auto-detected from first bytes</li>
- *   <li>Cached thread pool for efficient concurrency</li>
- * </ul>
- */
-public final class TcpServer {
+public final class TcpServer implements Runnable {
     
-    private final ServerConfig config;
-    private final ClientRegistry registry;
+    private final int port;
+    private final int maxClients;
     private final BlockingQueue<EngineRequest> engineQueue;
+    private final ClientRegistry registry;
     private final Metrics metrics;
     private final ExecutorService executor;
-    
     private volatile boolean running = true;
     private ServerSocket serverSocket;
     
-    public TcpServer(
-            ServerConfig config,
-            ClientRegistry registry,
-            BlockingQueue<EngineRequest> engineQueue,
-            Metrics metrics) {
-        
-        this.config = config;
-        this.registry = registry;
+    public TcpServer(int port, int maxClients, BlockingQueue<EngineRequest> engineQueue,
+                     ClientRegistry registry, Metrics metrics) {
+        this.port = port;
+        this.maxClients = maxClients;
         this.engineQueue = engineQueue;
+        this.registry = registry;
         this.metrics = metrics;
-        
-        // Use cached thread pool for scalable I/O (Java 17 compatible)
-        this.executor = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r);
-            t.setDaemon(true);
-            return t;
-        });
+        this.executor = Executors.newVirtualThreadPerTaskExecutor();
     }
     
-    /**
-     * Start the TCP server (blocks until shutdown).
-     */
-    public void start() throws IOException {
-        serverSocket = new ServerSocket();
-        serverSocket.setReuseAddress(true);
-        serverSocket.bind(new InetSocketAddress(config.tcpBindAddr(), config.tcpPort()));
-        
-        System.err.println("TCP server listening on " + config.tcpAddress());
-        
-        while (running) {
-            try {
-                Socket clientSocket = serverSocket.accept();
-                
-                // Check client limit
-                if (registry.clientCount() >= config.maxTcpClients()) {
-                    System.err.println("Rejecting " + clientSocket.getRemoteSocketAddress() 
-                        + ": max clients reached");
-                    clientSocket.close();
-                    continue;
-                }
-                
-                // Handle client in thread pool
-                executor.submit(() -> handleClient(clientSocket));
-                
-            } catch (SocketException e) {
-                if (running) {
-                    System.err.println("Accept error: " + e.getMessage());
-                }
-            }
-        }
-    }
-    
-    /**
-     * Stop the server.
-     */
-    public void stop() {
+    public void shutdown() {
         running = false;
+        try { if (serverSocket != null) serverSocket.close(); } catch (IOException ignored) {}
+        executor.shutdownNow();
+    }
+    
+    @Override
+    public void run() {
         try {
-            if (serverSocket != null) {
-                serverSocket.close();
+            serverSocket = new ServerSocket(port);
+            serverSocket.setReuseAddress(true);
+            System.err.println("TCP server: listening on port " + port);
+            
+            while (running) {
+                try {
+                    Socket socket = serverSocket.accept();
+                    if (registry.clientCount() >= maxClients) {
+                        socket.close();
+                        continue;
+                    }
+                    executor.submit(() -> handleClient(socket));
+                } catch (IOException e) {
+                    if (running) System.err.println("Accept error: " + e.getMessage());
+                }
             }
         } catch (IOException e) {
-            // Ignore
+            System.err.println("TCP server error: " + e.getMessage());
         }
-        executor.shutdown();
+        System.err.println("TCP server: stopped");
     }
     
-    /**
-     * Handle a single TCP client connection.
-     */
     private void handleClient(Socket socket) {
         ClientId clientId = ClientId.next();
-        SocketAddress peerAddr = socket.getRemoteSocketAddress();
-        
-        metrics.tcpConnectionsTotal.increment();
-        metrics.tcpConnectionsActive.increment();
+        Codec.Type protocol = Codec.Type.CSV;
         
         try {
-            // Configure socket
             socket.setTcpNoDelay(true);
-            socket.setSoTimeout((int) config.readTimeout().toMillis());
+            socket.setSoTimeout(30000);
             
-            InputStream in = new BufferedInputStream(socket.getInputStream(), config.tcpReadBufferSize());
-            OutputStream out = new BufferedOutputStream(socket.getOutputStream());
+            InputStream in = socket.getInputStream();
+            OutputStream out = socket.getOutputStream();
             
-            // Detect protocol from first bytes
-            in.mark(8);
-            byte[] peek = new byte[8];
-            int peekLen = in.read(peek);
-            in.reset();
+            // Detect protocol from first byte
+            int first = in.read();
+            if (first < 0) return;
             
-            Codec.Type protocolType = detectProtocol(peek, peekLen);
-            Codec codec = getCodec(protocolType);
+            protocol = (first == WireConstants.MAGIC) ? Codec.Type.BINARY : Codec.Type.CSV;
             
-            System.err.println(clientId + ": connected from " + peerAddr + " using " + protocolType);
+            ClientInfo info = new ClientInfo(clientId, socket.getRemoteSocketAddress(),
+                                            ClientInfo.Transport.TCP, protocol);
+            BlockingQueue<OutputMessage> outQueue = registry.register(info);
             
-            // Register client
-            ClientInfo info = new ClientInfo(clientId, peerAddr, Transport.TCP, protocolType);
-            BlockingQueue<OutputMessage> outboundQueue = registry.register(info);
+            System.err.println(clientId + ": connected (" + protocol + ")");
             
             // Start writer thread
-            Thread writerThread = new Thread(() -> 
-                runWriter(clientId, out, outboundQueue, codec));
-            writerThread.setDaemon(true);
-            writerThread.start();
+            executor.submit(() -> runWriter(clientId, outQueue, out, protocol));
             
-            // Run reader loop (in current thread)
-            runReader(clientId, in, codec);
-            
-            // Cleanup
-            writerThread.interrupt();
-            
-        } catch (IOException e) {
-            System.err.println(clientId + ": error: " + e.getMessage());
-        } finally {
-            registry.unregister(clientId);
-            metrics.tcpConnectionsActive.decrement();
-            
-            try {
-                socket.close();
-            } catch (IOException e) {
-                // Ignore
+            // Reader loop
+            if (protocol == Codec.Type.BINARY) {
+                runBinaryReader(clientId, in, (byte) first);
+            } else {
+                runCsvReader(clientId, in, (byte) first);
             }
             
+        } catch (Exception e) {
+            if (running) System.err.println(clientId + ": " + e.getMessage());
+        } finally {
+            registry.unregister(clientId);
+            try { socket.close(); } catch (IOException ignored) {}
             System.err.println(clientId + ": disconnected");
         }
     }
     
-    /**
-     * Reader loop - decode messages and submit to engine.
-     */
-    private void runReader(ClientId clientId, InputStream in, Codec codec) {
-        try {
-            if (codec.type() == Codec.Type.CSV) {
-                runCsvReader(clientId, in);
-            } else {
-                runBinaryReader(clientId, in);
-            }
-        } catch (SocketTimeoutException e) {
-            System.err.println(clientId + ": read timeout");
-        } catch (IOException e) {
-            if (running) {
-                System.err.println(clientId + ": read error: " + e.getMessage());
-            }
-        }
-    }
-    
-    /**
-     * CSV reader loop.
-     */
-    private void runCsvReader(ClientId clientId, InputStream in) throws IOException {
+    private void runCsvReader(ClientId clientId, InputStream in, byte firstByte) throws IOException {
         BufferedReader reader = new BufferedReader(new InputStreamReader(in));
+        StringBuilder sb = new StringBuilder();
+        sb.append((char) firstByte);
+        
         String line;
+        // Read rest of first line
+        String rest = reader.readLine();
+        if (rest != null) {
+            sb.append(rest);
+            processLine(clientId, sb.toString());
+        }
         
+        // Read subsequent lines
         while (running && (line = reader.readLine()) != null) {
-            String trimmed = line.trim();
-            if (trimmed.isEmpty() || trimmed.startsWith("#")) {
-                continue;
-            }
-            
-            try {
-                var msgOpt = CsvCodec.INSTANCE.decodeInputLine(trimmed);
-                if (msgOpt.isPresent()) {
-                    submitRequest(clientId, msgOpt.get());
-                }
-            } catch (ProtocolException e) {
-                metrics.decodeErrors.increment();
-                System.err.println(clientId + ": invalid CSV: " + trimmed);
-            }
+            processLine(clientId, line);
         }
     }
     
-    /**
-     * Binary reader loop (length-prefixed framing).
-     */
-    private void runBinaryReader(ClientId clientId, InputStream in) throws IOException {
-        DataInputStream dataIn = new DataInputStream(in);
-        byte[] frameBuf = new byte[256];
-        ByteBuffer buffer = ByteBuffer.wrap(frameBuf).order(ByteOrder.BIG_ENDIAN);
+    private void processLine(ClientId clientId, String line) {
+        try {
+            var msgOpt = CsvCodec.INSTANCE.decodeInputLine(line);
+            if (msgOpt.isPresent()) {
+                submitRequest(clientId, msgOpt.get());
+            }
+        } catch (ProtocolException e) {
+            metrics.decodeErrors.increment();
+            System.err.println(clientId + ": decode error: " + e.getMessage());
+        }
+    }
+    
+    private void runBinaryReader(ClientId clientId, InputStream in, byte firstByte) throws IOException {
+        ByteBuffer lenBuf = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
+        byte[] frameBuf = new byte[1024];
+        ByteBuffer frame = ByteBuffer.wrap(frameBuf).order(ByteOrder.BIG_ENDIAN);
         
+        // Handle first message (already read magic byte)
+        lenBuf.put(firstByte);
+        if (in.readNBytes(lenBuf.array(), 1, 3) < 3) return;
+        int len = lenBuf.getInt(0) - 4;
+        if (len > 0 && len < frameBuf.length) {
+            if (in.readNBytes(frameBuf, 0, len) == len) {
+                frame.position(0).limit(len);
+                processFrame(clientId, frame);
+            }
+        }
+        
+        // Read subsequent frames
         while (running) {
-            // Read 4-byte length prefix
-            int frameLen;
-            try {
-                frameLen = dataIn.readInt();
-            } catch (EOFException e) {
-                break; // Client disconnected
-            }
-            
-            // Validate frame length
-            if (frameLen <= 0 || frameLen > 65536) {
-                System.err.println(clientId + ": invalid frame length: " + frameLen);
-                break;
-            }
-            
-            // Resize buffer if needed
-            if (frameBuf.length < frameLen) {
-                frameBuf = new byte[frameLen];
-                buffer = ByteBuffer.wrap(frameBuf).order(ByteOrder.BIG_ENDIAN);
-            }
-            
-            // Read frame payload
-            dataIn.readFully(frameBuf, 0, frameLen);
-            
-            // Decode message
-            buffer.position(0).limit(frameLen);
-            try {
-                var msgOpt = BinaryCodec.INSTANCE.decodeInput(buffer);
-                if (msgOpt.isPresent()) {
-                    submitRequest(clientId, msgOpt.get());
-                }
-            } catch (ProtocolException e) {
-                metrics.decodeErrors.increment();
-                System.err.println(clientId + ": decode error: " + e.getMessage());
-            }
+            lenBuf.clear();
+            if (in.readNBytes(lenBuf.array(), 0, 4) < 4) break;
+            len = lenBuf.getInt(0);
+            if (len <= 0 || len > frameBuf.length) break;
+            if (in.readNBytes(frameBuf, 0, len) < len) break;
+            frame.position(0).limit(len);
+            processFrame(clientId, frame);
         }
     }
     
-    /**
-     * Submit a request to the engine queue.
-     */
+    private void processFrame(ClientId clientId, ByteBuffer frame) {
+        try {
+            var msgOpt = BinaryCodec.INSTANCE.decodeInput(frame);
+            if (msgOpt.isPresent()) {
+                submitRequest(clientId, msgOpt.get());
+            }
+        } catch (ProtocolException e) {
+            metrics.decodeErrors.increment();
+            System.err.println(clientId + ": decode error: " + e.getMessage());
+        }
+    }
+    
     private void submitRequest(ClientId clientId, InputMessage msg) {
-        EngineRequest request = EngineRequest.of(clientId, msg);
-        
-        if (!engineQueue.offer(request)) {
+        if (!engineQueue.offer(EngineRequest.of(clientId, msg))) {
             metrics.channelFullDrops.increment();
-            System.err.println(clientId + ": engine queue full, dropping message");
         }
     }
     
-    /**
-     * Writer loop - send outbound messages to client.
-     */
-    private void runWriter(
-            ClientId clientId,
-            OutputStream out,
-            BlockingQueue<OutputMessage> queue,
-            Codec codec) {
-        
-        ByteBuffer buffer = ByteBuffer.allocate(256).order(ByteOrder.BIG_ENDIAN);
+    private void runWriter(ClientId clientId, BlockingQueue<OutputMessage> queue,
+                          OutputStream out, Codec.Type protocol) {
+        ByteBuffer buf = ByteBuffer.allocate(256).order(ByteOrder.BIG_ENDIAN);
         
         try {
             while (running) {
                 OutputMessage msg = queue.poll(100, TimeUnit.MILLISECONDS);
-                if (msg == null) {
-                    continue;
-                }
+                if (msg == null) continue;
                 
-                if (codec.type() == Codec.Type.CSV) {
+                buf.clear();
+                if (protocol == Codec.Type.BINARY) {
+                    buf.position(4); // reserve for length
+                    BinaryCodec.INSTANCE.encodeOutput(msg, buf);
+                    int len = buf.position() - 4;
+                    buf.putInt(0, len);
+                    out.write(buf.array(), 0, buf.position());
+                } else {
                     String line = CsvCodec.INSTANCE.encodeOutputLine(msg) + "\n";
                     out.write(line.getBytes());
-                } else {
-                    // Length-prefixed binary
-                    buffer.clear();
-                    BinaryCodec.INSTANCE.encodeOutput(msg, buffer);
-                    buffer.flip();
-                    
-                    int frameLen = buffer.remaining();
-                    out.write((frameLen >> 24) & 0xFF);
-                    out.write((frameLen >> 16) & 0xFF);
-                    out.write((frameLen >> 8) & 0xFF);
-                    out.write(frameLen & 0xFF);
-                    out.write(buffer.array(), 0, frameLen);
                 }
-                
                 out.flush();
                 metrics.messagesSent.increment();
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (Exception e) {
-            if (running) {
-                metrics.sendErrors.increment();
-            }
+            if (running) metrics.sendErrors.increment();
         }
-    }
-    
-    /**
-     * Detect protocol from first bytes.
-     */
-    private Codec.Type detectProtocol(byte[] peek, int len) {
-        if (len <= 0) {
-            return Codec.Type.CSV;
-        }
-        
-        ByteBuffer buf = ByteBuffer.wrap(peek, 0, len);
-        var protocol = ProtocolDetector.detect(buf);
-        
-        return switch (protocol) {
-            case BINARY -> Codec.Type.BINARY;
-            case FIX -> Codec.Type.CSV; // FIX not implemented, fallback to CSV
-            default -> Codec.Type.CSV;
-        };
-    }
-    
-    /**
-     * Get codec for protocol type.
-     */
-    private Codec getCodec(Codec.Type type) {
-        return switch (type) {
-            case BINARY -> BinaryCodec.INSTANCE;
-            default -> CsvCodec.INSTANCE;
-        };
     }
 }

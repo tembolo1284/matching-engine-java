@@ -2,195 +2,95 @@ package com.engine.transport;
 
 import com.engine.messages.OutputMessage;
 
-import java.io.IOException;
 import java.util.concurrent.*;
 
-/**
- * Main entry point for the matching engine server.
- * 
- * <p>Orchestrates:
- * <ul>
- *   <li>Engine task (message processing)</li>
- *   <li>TCP server (client connections)</li>
- *   <li>Multicast publisher (market data)</li>
- * </ul>
- * 
- * <h2>Usage</h2>
- * <pre>{@code
- * EngineServer server = new EngineServer(ServerConfig.fromEnv());
- * server.registerSymbols("IBM", "AAPL", "GOOG");
- * server.start(); // Blocks until shutdown
- * }</pre>
- */
 public final class EngineServer {
     
     private final ServerConfig config;
-    private final Metrics metrics;
-    private final ClientRegistry registry;
+    private final Metrics metrics = new Metrics();
     private final BlockingQueue<EngineRequest> engineQueue;
     private final BlockingQueue<OutputMessage> multicastQueue;
+    private final ClientRegistry registry;
     
     private EngineTask engineTask;
     private TcpServer tcpServer;
     private MulticastPublisher multicastPublisher;
-    
     private Thread engineThread;
+    private Thread tcpThread;
     private Thread multicastThread;
     
-    /**
-     * Create a new engine server.
-     */
     public EngineServer(ServerConfig config) {
         this.config = config;
-        this.metrics = new Metrics();
-        this.registry = new ClientRegistry(config.clientChannelCapacity());
-        this.engineQueue = new LinkedBlockingQueue<>(config.engineChannelCapacity());
+        this.engineQueue = new LinkedBlockingQueue<>(config.channelCapacity());
         this.multicastQueue = config.multicastEnabled() 
-            ? new LinkedBlockingQueue<>(config.multicastChannelCapacity())
-            : null;
+            ? new LinkedBlockingQueue<>(config.channelCapacity()) : null;
+        this.registry = new ClientRegistry(config.clientQueueCapacity());
     }
     
-    /**
-     * Pre-register symbols.
-     */
-    public EngineServer registerSymbols(String... symbols) {
-        if (engineTask != null) {
-            engineTask.registerSymbols(symbols);
-        }
-        return this;
-    }
-    
-    /**
-     * Start the server (blocks until shutdown).
-     */
-    public void start() throws IOException {
+    public void start() {
         printBanner();
         
-        // Create engine task
+        // Engine task
         engineTask = new EngineTask(engineQueue, registry, multicastQueue, metrics);
-        
-        // Start engine thread
-        engineThread = new Thread(engineTask, "engine-task");
+        engineTask.registerSymbols("IBM", "AAPL", "GOOG", "MSFT", "TSLA");
+        engineThread = new Thread(engineTask, "engine");
         engineThread.start();
         
-        // Start multicast publisher if enabled
-        if (config.multicastEnabled() && multicastQueue != null) {
-            multicastPublisher = new MulticastPublisher(config, multicastQueue, metrics);
-            multicastThread = new Thread(multicastPublisher, "multicast-publisher");
+        // TCP server
+        tcpServer = new TcpServer(config.tcpPort(), config.maxClients(), 
+                                  engineQueue, registry, metrics);
+        tcpThread = new Thread(tcpServer, "tcp-server");
+        tcpThread.start();
+        
+        // Multicast publisher
+        if (config.multicastEnabled()) {
+            multicastPublisher = new MulticastPublisher(multicastQueue, 
+                config.multicastGroup(), config.multicastPort(), metrics);
+            multicastThread = new Thread(multicastPublisher, "multicast");
             multicastThread.start();
         }
         
-        // Setup shutdown hook
-        Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown, "shutdown-hook"));
-        
-        // Start TCP server (blocks until shutdown)
-        if (config.tcpEnabled()) {
-            tcpServer = new TcpServer(config, registry, engineQueue, metrics);
-            tcpServer.start();
-        } else {
-            // Just wait for interrupt
-            try {
-                Thread.currentThread().join();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        System.err.println("Server started");
     }
     
-    /**
-     * Shutdown the server.
-     */
     public void shutdown() {
-        System.err.println();
-        System.err.println("==============================================================");
         System.err.println("Shutting down...");
-        System.err.println("==============================================================");
         
-        // Stop accepting new connections
-        if (tcpServer != null) {
-            tcpServer.stop();
-        }
+        if (tcpServer != null) tcpServer.shutdown();
+        if (multicastPublisher != null) multicastPublisher.shutdown();
+        if (engineTask != null) engineTask.shutdown();
         
-        // Stop multicast publisher
-        if (multicastPublisher != null) {
-            multicastPublisher.shutdown();
-        }
-        
-        // Stop engine task
-        if (engineTask != null) {
-            engineTask.shutdown();
-        }
-        
-        // Wait for threads to finish
         try {
-            if (engineThread != null) {
-                engineThread.join(1000);
-            }
-            if (multicastThread != null) {
-                multicastThread.join(1000);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+            if (tcpThread != null) tcpThread.join(1000);
+            if (multicastThread != null) multicastThread.join(1000);
+            if (engineThread != null) engineThread.join(1000);
+        } catch (InterruptedException ignored) {}
         
-        // Print metrics
         metrics.printSummary();
-        
-        System.err.println("Goodbye!");
     }
     
-    /**
-     * Get metrics (for monitoring).
-     */
-    public Metrics metrics() {
-        return metrics;
-    }
-    
-    /**
-     * Print startup banner.
-     */
     private void printBanner() {
-        System.err.println("==============================================================");
-        System.err.println("         Java Matching Engine Server v0.1.0");
-        System.err.println("==============================================================");
-        System.err.println();
-        System.err.println("Transports:");
-        if (config.tcpEnabled()) {
-            System.err.println("  TCP:       " + config.tcpAddress() + " (CSV, Binary)");
-        }
-        if (config.udpEnabled()) {
-            System.err.println("  UDP:       " + config.udpAddress() + " (CSV, Binary)");
-        }
-        if (config.multicastEnabled()) {
-            System.err.println("  Multicast: " + config.multicastAddress() + " (Binary)");
-        }
-        System.err.println();
-        System.err.println("Limits:");
-        System.err.println("  Max TCP clients:    " + config.maxTcpClients());
-        System.err.println("  Engine queue:       " + config.engineChannelCapacity());
-        System.err.println("  Client queue:       " + config.clientChannelCapacity());
-        System.err.println();
-        System.err.println("==============================================================");
-        System.err.println("Ready. Press Ctrl+C to shutdown.");
-        System.err.println("==============================================================");
+        System.err.println("====================================");
+        System.err.println("  Java Matching Engine v0.1.0");
+        System.err.println("====================================");
+        System.err.println("TCP Port:    " + config.tcpPort());
+        System.err.println("Multicast:   " + (config.multicastEnabled() 
+            ? config.multicastGroup() + ":" + config.multicastPort() : "disabled"));
+        System.err.println("Max clients: " + config.maxClients());
+        System.err.println("====================================");
     }
-    
-    // =========================================================================
-    // Main Entry Point
-    // =========================================================================
     
     public static void main(String[] args) {
+        ServerConfig config = ServerConfig.fromEnv().parseArgs(args);
+        EngineServer server = new EngineServer(config);
+        
+        Runtime.getRuntime().addShutdownHook(new Thread(server::shutdown));
+        
+        server.start();
+        
+        // Keep main thread alive
         try {
-            ServerConfig config = ServerConfig.fromEnv().parseArgs(args);
-            
-            EngineServer server = new EngineServer(config);
-            server.registerSymbols("IBM", "AAPL", "GOOG", "MSFT", "TSLA");
-            server.start();
-            
-        } catch (Exception e) {
-            System.err.println("Fatal error: " + e.getMessage());
-            e.printStackTrace();
-            System.exit(1);
-        }
+            Thread.currentThread().join();
+        } catch (InterruptedException ignored) {}
     }
 }
