@@ -2,10 +2,14 @@
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/core/Order.java
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/core/OrderBook.java
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/core/PriceLevel.java
+/home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/messages/Ack.java
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/messages/Cancel.java
+/home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/messages/CancelAck.java
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/messages/InputMessage.java
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/messages/NewOrder.java
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/messages/OutputMessage.java
+/home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/messages/TopOfBookUpdate.java
+/home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/messages/Trade.java
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/protocol/BinaryCodec.java
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/protocol/Codec.java
 /home/paullopez/java-workspace/matching-engine-java/src/main/java/com/engine/protocol/CsvCodec.java

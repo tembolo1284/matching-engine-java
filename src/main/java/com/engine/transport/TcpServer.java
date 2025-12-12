@@ -64,7 +64,6 @@ public final class TcpServer implements Runnable {
     
     private void handleClient(Socket socket) {
         ClientId clientId = ClientId.next();
-        Codec.Type protocol = Codec.Type.CSV;
         
         try {
             socket.setTcpNoDelay(true);
@@ -77,7 +76,7 @@ public final class TcpServer implements Runnable {
             int first = in.read();
             if (first < 0) return;
             
-            protocol = (first == WireConstants.MAGIC) ? Codec.Type.BINARY : Codec.Type.CSV;
+            final Codec.Type protocol = (first == WireConstants.MAGIC) ? Codec.Type.BINARY : Codec.Type.CSV;
             
             ClientInfo info = new ClientInfo(clientId, socket.getRemoteSocketAddress(),
                                             ClientInfo.Transport.TCP, protocol);
@@ -129,7 +128,7 @@ public final class TcpServer implements Runnable {
             if (msgOpt.isPresent()) {
                 submitRequest(clientId, msgOpt.get());
             }
-        } catch (ProtocolException e) {
+        } catch (com.engine.protocol.ProtocolException e) {
             metrics.decodeErrors.increment();
             System.err.println(clientId + ": decode error: " + e.getMessage());
         }
@@ -169,7 +168,7 @@ public final class TcpServer implements Runnable {
             if (msgOpt.isPresent()) {
                 submitRequest(clientId, msgOpt.get());
             }
-        } catch (ProtocolException e) {
+        } catch (com.engine.protocol.ProtocolException e) {
             metrics.decodeErrors.increment();
             System.err.println(clientId + ": decode error: " + e.getMessage());
         }
