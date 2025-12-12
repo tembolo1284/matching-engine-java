@@ -9,18 +9,18 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class OrderBook {
-    
+
     private final Symbol symbol;
     private final List<PriceLevel> bids = new ArrayList<>(64);
     private final List<PriceLevel> asks = new ArrayList<>(64);
     private TopOfBookSnapshot prevTob = TopOfBookSnapshot.EMPTY;
-    
+
     public OrderBook(Symbol symbol) {
         this.symbol = symbol;
     }
-    
+
     public Symbol symbol() { return symbol; }
-    
+
     public void addOrder(Order order, List<OutputMessage> outputs) {
         outputs.add(Ack.of(symbol, order.userId(), order.userOrderId()));
         matchOrder(order, outputs);
@@ -29,7 +29,7 @@ public final class OrderBook {
         }
         emitTobChanges(outputs);
     }
-    
+
     public boolean cancelOrder(Order order, List<OutputMessage> outputs) {
         List<PriceLevel> levels = order.side() == Side.BUY ? bids : asks;
         for (PriceLevel level : levels) {
@@ -42,13 +42,41 @@ public final class OrderBook {
         }
         return false;
     }
-    
-    public void flush() {
+
+    public void flush(List<OutputMessage> outputs) {
+        // Generate CancelAck for each order on bid side
+        for (PriceLevel level : bids) {
+            for (Order order : level.orders()) {
+                outputs.add(CancelAck.of(symbol, order.userId(), order.userOrderId()));
+            }
+        }
+        
+        // Generate CancelAck for each order on ask side
+        for (PriceLevel level : asks) {
+            for (Order order : level.orders()) {
+                outputs.add(CancelAck.of(symbol, order.userId(), order.userOrderId()));
+            }
+        }
+        
+        // Check if we had orders (need to emit empty TOB)
+        boolean hadBids = !bids.isEmpty();
+        boolean hadAsks = !asks.isEmpty();
+        
+        // Clear the book
         bids.clear();
         asks.clear();
+        
+        // Emit empty TOB updates if we had orders
+        if (hadBids) {
+            outputs.add(TopOfBookUpdate.eliminated(symbol, Side.BUY));
+        }
+        if (hadAsks) {
+            outputs.add(TopOfBookUpdate.eliminated(symbol, Side.SELL));
+        }
+        
         prevTob = TopOfBookSnapshot.EMPTY;
     }
-    
+
     public TopOfBookSnapshot getTopOfBook() {
         int bidPrice = 0, bidQty = 0, askPrice = 0, askQty = 0;
         if (!bids.isEmpty()) {
@@ -61,21 +89,21 @@ public final class OrderBook {
         }
         return new TopOfBookSnapshot(bidPrice, bidQty, askPrice, askQty);
     }
-    
+
     private void matchOrder(Order aggressor, List<OutputMessage> outputs) {
         List<PriceLevel> passiveLevels = aggressor.side() == Side.BUY ? asks : bids;
-        
+
         while (!aggressor.isFilled() && !passiveLevels.isEmpty()) {
             PriceLevel best = passiveLevels.get(0);
             if (!aggressor.canMatch(best.price())) break;
-            
+
             while (!aggressor.isFilled() && !best.isEmpty()) {
                 Order passive = best.front();
                 int fillQty = Math.min(aggressor.remainingQty(), passive.remainingQty());
                 aggressor.fill(fillQty);
                 passive.fill(fillQty);
                 best.updateQuantity(fillQty);
-                
+
                 int buyUser, buyOrder, sellUser, sellOrder;
                 if (aggressor.side() == Side.BUY) {
                     buyUser = aggressor.userId(); buyOrder = aggressor.userOrderId();
@@ -85,17 +113,17 @@ public final class OrderBook {
                     sellUser = aggressor.userId(); sellOrder = aggressor.userOrderId();
                 }
                 outputs.add(Trade.of(symbol, buyUser, buyOrder, sellUser, sellOrder, best.price(), fillQty));
-                
+
                 if (passive.isFilled()) best.removeFilledFromFront();
             }
             if (best.isEmpty()) passiveLevels.remove(0);
         }
     }
-    
+
     private void addToBook(Order order) {
         List<PriceLevel> levels = order.side() == Side.BUY ? bids : asks;
         boolean ascending = order.side() == Side.SELL;
-        
+
         int insertIdx = 0;
         for (PriceLevel level : levels) {
             if (level.price() == order.price()) {
@@ -109,11 +137,11 @@ public final class OrderBook {
         newLevel.addOrder(order);
         levels.add(insertIdx, newLevel);
     }
-    
+
     private void emitTobChanges(List<OutputMessage> outputs) {
         TopOfBookSnapshot current = getTopOfBook();
         if (prevTob.bidChanged(current)) {
-            outputs.add(current.hasBid() 
+            outputs.add(current.hasBid()
                 ? TopOfBookUpdate.of(symbol, Side.BUY, current.bidPrice(), current.bidQty())
                 : TopOfBookUpdate.eliminated(symbol, Side.BUY));
         }
